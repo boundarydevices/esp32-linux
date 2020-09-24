@@ -45,7 +45,7 @@ static struct esp_serial_devs {
 	void *priv;
 } devs[ESP_SERIAL_MINOR_MAX];
 
-static int esp_serial_read(struct file *file, char __user *user_buffer, size_t size, loff_t *offset)
+static ssize_t esp_serial_read(struct file *file, char __user *user_buffer, size_t size, loff_t *offset)
 {
 	struct esp_serial_devs *dev;
        	dev = (struct esp_serial_devs *) file->private_data;
@@ -58,7 +58,7 @@ static int esp_serial_read(struct file *file, char __user *user_buffer, size_t s
 	return size;
 }
 
-static int esp_serial_write(struct file *file, const char __user *user_buffer, size_t size, loff_t * offset)
+static ssize_t esp_serial_write(struct file *file, const char __user *user_buffer, size_t size, loff_t * offset)
 {
 	struct esp_payload_header *hdr;
 	char *buf;
