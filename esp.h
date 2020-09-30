@@ -89,4 +89,8 @@ struct esp_private {
 struct esp_skb_cb {
 	struct esp_private		*priv;
 };
+
+void deinit_adapter(void);
+void esp_reset(void);
+struct esp_adapter * init_adapter(void);
 #endif

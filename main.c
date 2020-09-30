@@ -34,26 +34,10 @@
 #endif
 #include "esp_bt_api.h"
 
-MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Amey Inamdar <amey.inamdar@espressif.com>");
-MODULE_AUTHOR("Mangesh Malusare <mangesh.malusare@espressif.com>");
-MODULE_AUTHOR("Yogesh Mantri <yogesh.mantri@espressif.com>");
-MODULE_DESCRIPTION("Host driver for ESP32 Hosted solution");
-MODULE_VERSION("0.01");
-
 struct esp_adapter adapter;
 volatile u8 stop_data = 0;
 
 #define ACTION_DROP 1
-/* Unless specified as part of argument, resetpin,
- * do not reset ESP32.
- */
-#define HOST_GPIO_PIN_INVALID -1
-static int resetpin = HOST_GPIO_PIN_INVALID;
-
-module_param(resetpin, int, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-MODULE_PARM_DESC(resetpin, "Host's GPIO pin number which is connected to ESP32's EN to reset ESP32");
-
 static int esp_open(struct net_device *ndev);
 static int esp_stop(struct net_device *ndev);
 static int esp_hard_start_xmit(struct sk_buff *skb, struct net_device *ndev);
@@ -582,7 +566,7 @@ static void esp_if_rx_work (struct work_struct *work)
 	esp_get_packets(&adapter);
 }
 
-static void deinit_adapter(void)
+void deinit_adapter(void)
 {
 	if (adapter.if_rx_workqueue)
 		destroy_workqueue(adapter.if_rx_workqueue);
@@ -591,40 +575,12 @@ static void deinit_adapter(void)
 		destroy_workqueue(adapter.tx_workqueue);
 }
 
-static void esp_reset(void)
-{
-	if (resetpin != HOST_GPIO_PIN_INVALID) {
-		/* Check valid GPIO or not */
-		if (!gpio_is_valid(resetpin)) {
-			printk(KERN_WARNING "esp32: host resetpin (%d) configured is invalid GPIO\n", resetpin);
-			resetpin = HOST_GPIO_PIN_INVALID;
-		}
-		else {
-			printk(KERN_DEBUG "esp32: Resetpin of Host is %d\n", resetpin);
-			gpio_request(resetpin, "sysfs");
-
-			/* HOST's resetpin set to OUTPUT, HIGH */
-			gpio_direction_output(resetpin, true);
-
-			/* HOST's resetpin set to LOW */
-			gpio_set_value(resetpin, 0);
-			udelay(100);
-
-			/* HOST's resetpin set to INPUT */
-			gpio_direction_input(resetpin);
-
-			printk(KERN_DEBUG "esp32: Triggering ESP reset.\n");
-		}
-	}
-}
-
-static struct esp_adapter * init_adapter(void)
+struct esp_adapter * init_adapter(void)
 {
 	memset(&adapter, 0, sizeof(adapter));
 
 	/* Prepare interface RX work */
 	adapter.if_rx_workqueue = create_workqueue("ESP_IF_RX_WORK_QUEUE");
-
 	if (!adapter.if_rx_workqueue) {
 		deinit_adapter();
 		return NULL;
@@ -634,7 +590,6 @@ static struct esp_adapter * init_adapter(void)
 
 	/* Prepare TX work */
 	adapter.tx_workqueue = create_workqueue("ESP_TX_WORK_QUEUE");
-
 	if (!adapter.tx_workqueue) {
 		deinit_adapter();
 		return NULL;
@@ -651,40 +606,3 @@ static struct esp_adapter * init_adapter(void)
 
 	return &adapter;
 }
-
-
-static int __init esp_init(void)
-{
-	int ret = 0;
-	struct esp_adapter	*adapter;
-
-	/* Reset ESP, Clean start ESP */
-	esp_reset();
-
-	/* Init adapter */
-	adapter = init_adapter();
-
-	if (!adapter)
-		return -EFAULT;
-
-	/* Init transport layer */
-	ret = esp_init_interface_layer(adapter);
-
-	if (ret != 0) {
-		deinit_adapter();
-	}
-
-	return ret;
-}
-
-static void __exit esp_exit(void)
-{
-	esp_deinit_interface_layer();
-	deinit_adapter();
-	if (resetpin != HOST_GPIO_PIN_INVALID) {
-		gpio_free(resetpin);
-	}
-}
-
-module_init(esp_init);
-module_exit(esp_exit);

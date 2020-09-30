@@ -295,21 +295,12 @@ static void esp_spi_work(struct work_struct *work)
 		dev_kfree_skb(tx_skb);
 }
 
-static int spi_init(void)
+static int spi_init(struct spi_device *spi)
 {
+	struct device *dev = &spi->dev;
 	int status = 0;
-	struct spi_board_info esp_board = {{0}};
-	struct spi_master *master = NULL;
-
-	strlcpy(esp_board.modalias, "esp_spi", sizeof(esp_board.modalias));
-	esp_board.mode = SPI_MODE_3;
-	/* 10MHz */
-	esp_board.max_speed_hz = 8000000;
-	esp_board.bus_num = 0;
-	esp_board.chip_select = 0;
 
 	spi_context.spi_workqueue = create_workqueue("ESP_SPI_WORK_QUEUE");
-
 	if (!spi_context.spi_workqueue) {
 		spi_exit();
 		return -EFAULT;
@@ -320,55 +311,19 @@ static int spi_init(void)
 	skb_queue_head_init(&spi_context.tx_q);
 	skb_queue_head_init(&spi_context.rx_q);
 
-	master = spi_busnum_to_master(esp_board.bus_num);
-
-	if (!master) {
-		printk(KERN_ERR "Failed to obtain SPI master handle\n");
-		spi_exit();
-		return -ENODEV;
-	}
-
-	spi_context.esp_spi_dev = spi_new_device(master, &esp_board);
-
+	spi_context.esp_spi_dev = spi;
 	if (!spi_context.esp_spi_dev) {
-		printk(KERN_ERR "Failed to add new SPI device\n");
+		dev_err(dev, "Failed to add new SPI device\n");
 		spi_exit();
 		return -ENODEV;
 	}
 
-	status = spi_setup(spi_context.esp_spi_dev);
-
+	status = devm_request_irq(dev, gpiod_to_irq(spi_context.handshake_gpio),
+				  spi_interrupt_handler,
+				  IRQF_SHARED | IRQF_TRIGGER_RISING,
+				  "ESP_SPI", spi_context.esp_spi_dev);
 	if (status) {
-		printk (KERN_ERR "Failed to setup new SPI device");
-		spi_exit();
-		return status;
-	}
-
-	printk (KERN_INFO "ESP32 device is registered to SPI bus [%d]"
-			",chip select [%d]\n", esp_board.bus_num,
-			esp_board.chip_select);
-
-	status = gpio_request(HANDSHAKE_PIN, "SPI_HANDSHAKE_PIN");
-
-	if (status) {
-		printk (KERN_ERR "Failed to obtain GPIO");
-		spi_exit();
-		return status;
-	}
-
-	status = gpio_direction_input(HANDSHAKE_PIN);
-
-	if (status) {
-		printk (KERN_ERR "Failed to set GPIO direction");
-		spi_exit();
-		return status;
-	}
-
-	status = request_irq(SPI_IRQ, spi_interrupt_handler,
-			IRQF_SHARED | IRQF_TRIGGER_RISING,
-			"ESP_SPI", spi_context.esp_spi_dev);
-	if (status) {
-		printk (KERN_ERR "Failed to request IRQ");
+		dev_err(dev, "Failed to request IRQ\n");
 		spi_exit();
 		return status;
 	}
@@ -379,7 +334,7 @@ static int spi_init(void)
 	status = esp_serial_init((void *) spi_context.adapter);
 	if (status != 0) {
 		spi_exit();
-		printk(KERN_ERR "Error initialising serial interface\n");
+		dev_err(dev, "Error initialising serial interface\n");
 		return status;
 	}
 #endif
@@ -387,7 +342,7 @@ static int spi_init(void)
 	status = esp_add_card(spi_context.adapter);
 	if (status) {
 		spi_exit();
-		printk (KERN_ERR "Failed to add card\n");
+		dev_err(dev, "Failed to add card\n");
 		return status;
 	}
 
@@ -398,7 +353,6 @@ static int spi_init(void)
 
 static void spi_exit(void)
 {
-	disable_irq(SPI_IRQ);
 	close_data_path();
 	msleep(200);
 
@@ -416,17 +370,11 @@ static void spi_exit(void)
 	if (spi_context.adapter->hcidev)
 		esp_deinit_bt(spi_context.adapter);
 
-	free_irq(SPI_IRQ, spi_context.esp_spi_dev);
-
-	gpio_free(HANDSHAKE_PIN);
-
-	if (spi_context.esp_spi_dev)
-		spi_unregister_device(spi_context.esp_spi_dev);
-
 	memset(&spi_context, 0, sizeof(spi_context));
 }
 
-int esp_init_interface_layer(struct esp_adapter *adapter)
+static int esp_init_interface_layer(struct esp_adapter *adapter,
+				    struct spi_device *spi)
 {
 	if (!adapter)
 		return -EINVAL;
@@ -438,10 +386,92 @@ int esp_init_interface_layer(struct esp_adapter *adapter)
 	adapter->if_type = ESP_IF_TYPE_SPI;
 	spi_context.adapter = adapter;
 
-	return spi_init();
+	return spi_init(spi);
 }
 
-void esp_deinit_interface_layer(void)
+static void esp_deinit_interface_layer(void)
 {
 	spi_exit();
 }
+
+static void esp32_spi_reset(void)
+{
+	gpiod_direction_output(spi_context.reset_gpio, GPIOD_OUT_LOW);
+	udelay(100);
+	gpiod_direction_input(spi_context.reset_gpio);
+}
+
+static int esp32_spi_probe_dt(struct device *dev)
+{
+	spi_context.reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(spi_context.reset_gpio)) {
+		dev_err(dev, "Can't get reset gpio\n");
+		return -ENODEV;
+	}
+
+	spi_context.handshake_gpio = devm_gpiod_get(dev, "handshake", GPIOD_IN);
+	if (IS_ERR(spi_context.handshake_gpio)) {
+		dev_err(dev, "Can't get handshake gpio\n");
+		return -ENODEV;
+	}
+}
+
+static int esp32_spi_probe(struct spi_device *spi)
+{
+	int ret = 0;
+	struct esp_adapter *adapter;
+
+	ret = esp32_spi_probe_dt(&spi->dev);
+	if (ret != 0)
+		return ret;
+
+	esp32_spi_reset();
+
+	/* Init adapter */
+	adapter = init_adapter();
+	if (!adapter)
+		return -EFAULT;
+
+	/* Init transport layer */
+	ret = esp_init_interface_layer(adapter, spi);
+	if (ret != 0) {
+		deinit_adapter();
+	} else
+		dev_info(&spi->dev, "probed!\n");
+
+	return ret;
+}
+
+static int esp32_spi_remove(struct spi_device *spi)
+{
+	esp_deinit_interface_layer();
+	deinit_adapter();
+
+	return 0;
+}
+
+#ifdef CONFIG_OF
+static const struct of_device_id esp32_spi_dt_ids[] = {
+	{ .compatible = "espressif,esp32" },
+	{},
+};
+MODULE_DEVICE_TABLE(of, esp32_spi_dt_ids);
+#endif
+
+static struct spi_driver esp32_spi_driver = {
+	.driver = {
+		.name = "esp32",
+		.of_match_table = of_match_ptr(esp32_spi_dt_ids),
+	},
+	.probe = esp32_spi_probe,
+	.remove = esp32_spi_remove,
+};
+module_spi_driver(esp32_spi_driver);
+
+MODULE_AUTHOR("Amey Inamdar <amey.inamdar@espressif.com>");
+MODULE_AUTHOR("Mangesh Malusare <mangesh.malusare@espressif.com>");
+MODULE_AUTHOR("Yogesh Mantri <yogesh.mantri@espressif.com>");
+MODULE_AUTHOR("Boundary Devices <info@boundarydevices.com>");
+MODULE_DESCRIPTION("Host SPI driver for ESP32 Hosted solution");
+MODULE_LICENSE("GPL");
+MODULE_ALIAS("spi:esp32");

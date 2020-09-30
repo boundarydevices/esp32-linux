@@ -19,8 +19,6 @@
 
 #include "esp.h"
 
-#define HANDSHAKE_PIN		17
-#define SPI_IRQ			gpio_to_irq(HANDSHAKE_PIN)
 #define SPI_BUF_SIZE		2048
 
 struct esp_spi_context {
@@ -28,14 +26,15 @@ struct esp_spi_context {
 	struct spi_device 	*esp_spi_dev;
 	struct sk_buff_head 	tx_q;
 	struct sk_buff_head 	rx_q;
-	struct workqueue_struct 	*spi_workqueue;
-	struct work_struct		spi_work;
+	struct workqueue_struct *spi_workqueue;
+	struct work_struct	spi_work;
+	struct gpio_desc	*reset_gpio;
+	struct gpio_desc	*handshake_gpio;
 };
 
 enum {
 	CLOSE_DATAPATH,
 	OPEN_DATAPATH,
 };
-
 
 #endif
