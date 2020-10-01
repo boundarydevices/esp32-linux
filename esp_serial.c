@@ -37,7 +37,7 @@
 
 //#define ESP_SERIAL_TEST
 
-
+bool initialized = false;
 static struct esp_serial_devs {
 	struct cdev cdev;
 	int dev_index;
@@ -180,16 +180,19 @@ int esp_serial_init(void *priv)
 #ifdef ESP_SERIAL_TEST
 	kthread_run(thread_fn, NULL, "esptest-thread");
 #endif
+	initialized = true;
+
 	return 0;
 }
 
 void esp_serial_cleanup(void)
 {
 	int i;
+	if (!initialized)
+		return;
 	for (i = 0; i < ESP_SERIAL_MINOR_MAX; i++) {
 		cdev_del(&devs[i].cdev);
 		esp_rb_cleanup(&devs[i].rb);
 	}
 	unregister_chrdev_region(MKDEV(ESP_SERIAL_MAJOR, 0), ESP_SERIAL_MINOR_MAX);
-	return;
 }

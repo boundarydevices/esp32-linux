@@ -323,7 +323,7 @@ static int spi_init(struct spi_device *spi)
 				  IRQF_SHARED | IRQF_TRIGGER_RISING,
 				  "ESP_SPI", spi_context.esp_spi_dev);
 	if (status) {
-		dev_err(dev, "Failed to request IRQ\n");
+		dev_err(dev, "Failed to request IRQ %d\n", status);
 		spi_exit();
 		return status;
 	}
@@ -414,6 +414,8 @@ static int esp32_spi_probe_dt(struct device *dev)
 		dev_err(dev, "Can't get handshake gpio\n");
 		return -ENODEV;
 	}
+
+	return 0;
 }
 
 static int esp32_spi_probe(struct spi_device *spi)
