@@ -318,10 +318,9 @@ static int spi_init(struct spi_device *spi)
 		return -ENODEV;
 	}
 
-	status = devm_request_irq(dev, gpiod_to_irq(spi_context.handshake_gpio),
-				  spi_interrupt_handler,
+	status = devm_request_irq(dev, spi->irq, spi_interrupt_handler,
 				  IRQF_SHARED | IRQF_TRIGGER_RISING,
-				  "ESP_SPI", spi_context.esp_spi_dev);
+				  "esp_spi", spi_context.esp_spi_dev);
 	if (status) {
 		dev_err(dev, "Failed to request IRQ %d\n", status);
 		spi_exit();
@@ -401,31 +400,17 @@ static void esp32_spi_reset(void)
 	gpiod_direction_input(spi_context.reset_gpio);
 }
 
-static int esp32_spi_probe_dt(struct device *dev)
+static int esp32_spi_probe(struct spi_device *spi)
 {
+	int ret = 0;
+	struct device *dev = &spi->dev;
+	struct esp_adapter *adapter;
+
 	spi_context.reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(spi_context.reset_gpio)) {
 		dev_err(dev, "Can't get reset gpio\n");
 		return -ENODEV;
 	}
-
-	spi_context.handshake_gpio = devm_gpiod_get(dev, "handshake", GPIOD_IN);
-	if (IS_ERR(spi_context.handshake_gpio)) {
-		dev_err(dev, "Can't get handshake gpio\n");
-		return -ENODEV;
-	}
-
-	return 0;
-}
-
-static int esp32_spi_probe(struct spi_device *spi)
-{
-	int ret = 0;
-	struct esp_adapter *adapter;
-
-	ret = esp32_spi_probe_dt(&spi->dev);
-	if (ret != 0)
-		return ret;
 
 	esp32_spi_reset();
 

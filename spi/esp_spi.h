@@ -29,7 +29,6 @@ struct esp_spi_context {
 	struct workqueue_struct *spi_workqueue;
 	struct work_struct	spi_work;
 	struct gpio_desc	*reset_gpio;
-	struct gpio_desc	*handshake_gpio;
 };
 
 enum {
