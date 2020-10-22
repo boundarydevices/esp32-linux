@@ -400,7 +400,7 @@ static void esp32_spi_reset(struct esp_spi_context *esp)
 {
 	gpiod_direction_output(esp->reset_gpio, GPIOD_OUT_LOW);
 	udelay(100);
-	gpiod_direction_input(esp->reset_gpio);
+	gpiod_direction_output(esp->reset_gpio, GPIOD_OUT_HIGH);
 }
 
 static int esp32_spi_probe(struct spi_device *spi)
