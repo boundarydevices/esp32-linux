@@ -27,10 +27,9 @@
 
 static struct sk_buff * read_packet(struct esp_adapter *adapter);
 static int write_packet(struct esp_adapter *adapter, u8 *buf, u32 size);
-static void spi_exit(void);
+static void spi_exit(struct esp_spi_context *esp);
 
 volatile u8 data_path = 0;
-static struct esp_spi_context spi_context;
 
 static struct esp_if_ops if_ops = {
 	.read		= read_packet,
@@ -50,18 +49,20 @@ static void close_data_path(void)
 	msleep(200);
 }
 
-static irqreturn_t spi_interrupt_handler(int irq, void * dev)
+static irqreturn_t spi_interrupt_handler(int irq, void * priv)
 {
+	struct esp_spi_context *esp = (struct esp_spi_context *)priv;
+
 	/* ESP32 is ready for next transaction */
-	if (spi_context.spi_workqueue)
-		queue_work(spi_context.spi_workqueue, &spi_context.spi_work);
+	if (esp->spi_workqueue)
+		queue_work(esp->spi_workqueue, &esp->spi_work);
 
 	return IRQ_HANDLED;
 }
 
 static struct sk_buff * read_packet(struct esp_adapter *adapter)
 {
-	struct esp_spi_context *context;
+	struct esp_spi_context *esp;
 	struct sk_buff *skb = NULL;
 
 	if (!data_path) {
@@ -73,10 +74,10 @@ static struct sk_buff * read_packet(struct esp_adapter *adapter)
 		return NULL;
 	}
 
-	context = adapter->if_context;
+	esp = adapter->if_context;
 
-	if (context->esp_spi_dev) {
-		skb = skb_dequeue(&(context->rx_q));
+	if (esp->esp_spi_dev) {
+		skb = skb_dequeue(&(esp->rx_q));
 	} else {
 		printk (KERN_ERR "%s: Invalid args\n", __func__);
 		return NULL;
@@ -87,7 +88,7 @@ static struct sk_buff * read_packet(struct esp_adapter *adapter)
 
 static int write_packet(struct esp_adapter *adapter, u8 *buf, u32 size)
 {
-	struct esp_spi_context *context;
+	struct esp_spi_context *esp;
 	struct sk_buff *skb;
 	u8 *tx_buf = NULL;
 
@@ -103,7 +104,7 @@ static int write_packet(struct esp_adapter *adapter, u8 *buf, u32 size)
 	/* Adjust length to make it multiple of 4 bytes  */
 	size += 4 - (size & 3);
 
-	context = adapter->if_context;
+	esp = adapter->if_context;
 
 	skb = esp_alloc_skb(size);
 
@@ -121,25 +122,25 @@ static int write_packet(struct esp_adapter *adapter, u8 *buf, u32 size)
 	memcpy(tx_buf, buf, size);
 
 	/* Enqueue SKB in tx_q */
-	skb_queue_tail(&spi_context.tx_q, skb);
+	skb_queue_tail(&esp->tx_q, skb);
 
 	return 0;
 }
 
-static void process_capabilities(u8 cap)
+static void process_capabilities(struct esp_spi_context *esp, u8 cap)
 {
 	printk (KERN_INFO "ESP32 capabilities: 0x%x", cap);
 
 	/* Reset BT */
-	esp_deinit_bt(spi_context.adapter);
+	esp_deinit_bt(esp->adapter);
 
 	if ((cap & ESP_BT_SPI_SUPPORT) || (cap & ESP_BT_SDIO_SUPPORT)) {
 		msleep(200);
-		esp_init_bt(spi_context.adapter);
+		esp_init_bt(esp->adapter);
 	}
 }
 
-static void process_init_event(u8 *evt_buf, u8 len)
+static void process_init_event(struct esp_spi_context *esp, u8 *evt_buf, u8 len)
 {
 	u8 len_left = len, tag_len;
 	u8 *pos;
@@ -152,7 +153,7 @@ static void process_init_event(u8 *evt_buf, u8 len)
 	while (len_left) {
 		tag_len = *(pos + 1);
 		if (*pos == ESP_PRIV_CAPABILITY) {
-			process_capabilities(*(pos + 2));
+			process_capabilities(esp, *(pos + 2));
 		} else {
 			printk (KERN_WARNING "Unsupported tag in event");
 		}
@@ -160,7 +161,7 @@ static void process_init_event(u8 *evt_buf, u8 len)
 	}
 }
 
-static void process_event(u8 *evt_buf, u16 len)
+static void process_event(struct esp_spi_context *esp, u8 *evt_buf, u16 len)
 {
 	struct esp_priv_event *event;
 
@@ -171,13 +172,13 @@ static void process_event(u8 *evt_buf, u16 len)
 
 	if (event->event_type == ESP_PRIV_EVENT_INIT) {
 		printk (KERN_INFO "Received INIT event from esp32");
-		process_init_event(event->event_data, event->event_len);
+		process_init_event(esp, event->event_data, event->event_len);
 	} else {
 		printk (KERN_WARNING "Drop unknown event");
 	}
 }
 
-static void process_priv_communication(struct sk_buff *skb)
+static void process_priv_communication(struct esp_spi_context *esp, struct sk_buff *skb)
 {
 	struct esp_payload_header *header;
 	u8 *payload;
@@ -192,13 +193,13 @@ static void process_priv_communication(struct sk_buff *skb)
 	len = le16_to_cpu(header->len);
 
 	if (header->priv_pkt_type == ESP_PACKET_TYPE_EVENT) {
-		process_event(payload, len);
+		process_event(esp, payload, len);
 	}
 
 	dev_kfree_skb(skb);
 }
 
-static int process_rx_buf(struct sk_buff *skb)
+static int process_rx_buf(struct esp_spi_context *esp, struct sk_buff *skb)
 {
 	struct esp_payload_header *header;
 	u16 len = 0;
@@ -228,7 +229,7 @@ static int process_rx_buf(struct sk_buff *skb)
 	skb_trim(skb, len);
 
 	if (header->if_type == ESP_PRIV_IF) {
-		process_priv_communication(skb);
+		process_priv_communication(esp, skb);
 		return 0;
 	}
 
@@ -236,16 +237,18 @@ static int process_rx_buf(struct sk_buff *skb)
 		return -EPERM;
 
 	/* enqueue skb for read_packet to pick it */
-	skb_queue_tail(&spi_context.rx_q, skb);
+	skb_queue_tail(&esp->rx_q, skb);
 
 	/* indicate reception of new packet */
-	esp_process_new_packet_intr(spi_context.adapter);
+	esp_process_new_packet_intr(esp->adapter);
 
 	return 0;
 }
 
 static void esp_spi_work(struct work_struct *work)
 {
+	struct esp_spi_context *esp = container_of(work,
+			struct esp_spi_context, spi_work);
 	struct spi_transfer trans;
 	struct sk_buff *tx_skb, *rx_skb;
 	u8 *rx_buf;
@@ -265,7 +268,7 @@ static void esp_spi_work(struct work_struct *work)
 
 	/* Configure TX buffer if available */
 	if (data_path)
-		tx_skb = skb_dequeue(&spi_context.tx_q);
+		tx_skb = skb_dequeue(&esp->tx_q);
 
 	if (tx_skb) {
 		trans.tx_buf = tx_skb->data;
@@ -280,14 +283,14 @@ static void esp_spi_work(struct work_struct *work)
 	trans.rx_buf = rx_buf;
 	trans.len = SPI_BUF_SIZE;
 
-	ret = spi_sync_transfer(spi_context.esp_spi_dev, &trans, 1);
+	ret = spi_sync_transfer(esp->esp_spi_dev, &trans, 1);
 
 	if (ret) {
 		printk(KERN_ERR "SPI Transaction failed: %d", ret);
 	}
 
 	/* Free rx_skb if received data is not valid */
-	if (process_rx_buf(rx_skb)) {
+	if (process_rx_buf(esp, rx_skb)) {
 		dev_kfree_skb(rx_skb);
 	}
 
@@ -295,52 +298,52 @@ static void esp_spi_work(struct work_struct *work)
 		dev_kfree_skb(tx_skb);
 }
 
-static int spi_init(struct spi_device *spi)
+static int spi_init(struct esp_spi_context *esp, struct spi_device *spi)
 {
 	struct device *dev = &spi->dev;
 	int status = 0;
 
-	spi_context.spi_workqueue = create_workqueue("ESP_SPI_WORK_QUEUE");
-	if (!spi_context.spi_workqueue) {
-		spi_exit();
+	esp->spi_workqueue = create_workqueue("ESP_SPI_WORK_QUEUE");
+	if (!esp->spi_workqueue) {
+		spi_exit(esp);
 		return -EFAULT;
 	}
 
-	INIT_WORK(&spi_context.spi_work, esp_spi_work);
+	INIT_WORK(&esp->spi_work, esp_spi_work);
 
-	skb_queue_head_init(&spi_context.tx_q);
-	skb_queue_head_init(&spi_context.rx_q);
+	skb_queue_head_init(&esp->tx_q);
+	skb_queue_head_init(&esp->rx_q);
 
-	spi_context.esp_spi_dev = spi;
-	if (!spi_context.esp_spi_dev) {
+	esp->esp_spi_dev = spi;
+	if (!esp->esp_spi_dev) {
 		dev_err(dev, "Failed to add new SPI device\n");
-		spi_exit();
+		spi_exit(esp);
 		return -ENODEV;
 	}
 
 	status = devm_request_irq(dev, spi->irq, spi_interrupt_handler,
 				  IRQF_SHARED | IRQF_TRIGGER_RISING,
-				  "esp_spi", spi_context.esp_spi_dev);
+				  "esp_spi", esp);
 	if (status) {
 		dev_err(dev, "Failed to request IRQ %d\n", status);
-		spi_exit();
+		spi_exit(esp);
 		return status;
 	}
 
 	open_data_path();
 
 #ifdef CONFIG_SUPPORT_ESP_SERIAL
-	status = esp_serial_init((void *) spi_context.adapter);
+	status = esp_serial_init((void *) esp->adapter);
 	if (status != 0) {
-		spi_exit();
+		spi_exit(esp);
 		dev_err(dev, "Error initialising serial interface\n");
 		return status;
 	}
 #endif
 
-	status = esp_add_card(spi_context.adapter);
+	status = esp_add_card(esp->adapter);
 	if (status) {
-		spi_exit();
+		spi_exit(esp);
 		dev_err(dev, "Failed to add card\n");
 		return status;
 	}
@@ -350,69 +353,74 @@ static int spi_init(struct spi_device *spi)
 	return status;
 }
 
-static void spi_exit(void)
+static void spi_exit(struct esp_spi_context *esp)
 {
 	close_data_path();
 	msleep(200);
 
-	skb_queue_purge(&spi_context.tx_q);
-	skb_queue_purge(&spi_context.rx_q);
+	skb_queue_purge(&esp->tx_q);
+	skb_queue_purge(&esp->rx_q);
 
-	if (spi_context.spi_workqueue) {
-		destroy_workqueue(spi_context.spi_workqueue);
-		spi_context.spi_workqueue = NULL;
+	if (esp->spi_workqueue) {
+		destroy_workqueue(esp->spi_workqueue);
+		esp->spi_workqueue = NULL;
 	}
 
 	esp_serial_cleanup();
-	esp_remove_card(spi_context.adapter);
+	esp_remove_card(esp->adapter);
 
-	if (spi_context.adapter->hcidev)
-		esp_deinit_bt(spi_context.adapter);
+	if (esp->adapter->hcidev)
+		esp_deinit_bt(esp->adapter);
 
-	memset(&spi_context, 0, sizeof(spi_context));
+	memset(esp, 0, sizeof(*esp));
 }
 
-static int esp_init_interface_layer(struct esp_adapter *adapter,
+static int esp_init_interface_layer(struct esp_spi_context *esp, struct esp_adapter *adapter,
 				    struct spi_device *spi)
 {
 	if (!adapter)
 		return -EINVAL;
 
-	memset(&spi_context, 0, sizeof(spi_context));
+	memset(esp, 0, sizeof(*esp));
 
-	adapter->if_context = &spi_context;
+	adapter->if_context = esp;
 	adapter->if_ops = &if_ops;
 	adapter->if_type = ESP_IF_TYPE_SPI;
-	spi_context.adapter = adapter;
+	esp->adapter = adapter;
 
-	return spi_init(spi);
+	return spi_init(esp, spi);
 }
 
-static void esp_deinit_interface_layer(void)
+static void esp_deinit_interface_layer(struct esp_spi_context *esp)
 {
-	spi_exit();
+	spi_exit(esp);
 }
 
-static void esp32_spi_reset(void)
+static void esp32_spi_reset(struct esp_spi_context *esp)
 {
-	gpiod_direction_output(spi_context.reset_gpio, GPIOD_OUT_LOW);
+	gpiod_direction_output(esp->reset_gpio, GPIOD_OUT_LOW);
 	udelay(100);
-	gpiod_direction_input(spi_context.reset_gpio);
+	gpiod_direction_input(esp->reset_gpio);
 }
 
 static int esp32_spi_probe(struct spi_device *spi)
 {
+	struct esp_spi_context *esp;
 	int ret = 0;
 	struct device *dev = &spi->dev;
 	struct esp_adapter *adapter;
 
-	spi_context.reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
-	if (IS_ERR(spi_context.reset_gpio)) {
+	esp = devm_kzalloc(dev, sizeof(*esp), GFP_KERNEL);
+	if (!esp)
+		return -ENOMEM;
+	esp->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
+	if (IS_ERR(esp->reset_gpio)) {
 		dev_err(dev, "Can't get reset gpio\n");
 		return -ENODEV;
 	}
+	spi_set_drvdata(spi, esp);
 
-	esp32_spi_reset();
+	esp32_spi_reset(esp);
 
 	/* Init adapter */
 	adapter = init_adapter();
@@ -420,7 +428,7 @@ static int esp32_spi_probe(struct spi_device *spi)
 		return -EFAULT;
 
 	/* Init transport layer */
-	ret = esp_init_interface_layer(adapter, spi);
+	ret = esp_init_interface_layer(esp, adapter, spi);
 	if (ret != 0) {
 		deinit_adapter();
 	} else
@@ -431,7 +439,9 @@ static int esp32_spi_probe(struct spi_device *spi)
 
 static int esp32_spi_remove(struct spi_device *spi)
 {
-	esp_deinit_interface_layer();
+	struct esp_spi_context *esp = spi_get_drvdata(spi);
+
+	esp_deinit_interface_layer(esp);
 	deinit_adapter();
 
 	return 0;
